@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
@@ -28,10 +29,68 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// STEP 2: Parse the form data
+	const maxMemory = 10 << 20 // 10MB
+	err = r.ParseMultipartForm(maxMemory)
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Unable to parse form", err)
+		return
+	}
 
-	fmt.Println("uploading thumbnail for video", videoID, "by user", userID)
+	// STEP 3: Get the image data from the form
+	file, fileHeader, err := r.FormFile("thumbnail")
+	if err != nil {
+		respondWithError(w, http.StatusBadRequest, "Unable to get file from form", err)
+		return
+	}
+	defer file.Close()
 
-	// TODO: implement the upload here
+	mediaType := fileHeader.Header.Get("Content-Type")
 
-	respondWithJSON(w, http.StatusOK, struct{}{})
+	// STEP 4: Read all the image data into a byte slice
+	imageData, err := io.ReadAll(file)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to read file data", err)
+		return
+	}
+
+	// STEP 5: Get the video's metadata and check ownership
+	video, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusNotFound, "Video not found", err)
+		return
+	}
+
+	// Check if the authenticated user owns this video
+	if video.UserID != userID {
+		respondWithError(w, http.StatusUnauthorized, "You can only upload thumbnails for your own videos", nil)
+		return
+	}
+
+	// STEP 6: Save the thumbnail to the global map
+	thumbnailData := thumbnail{
+		data:      imageData,
+		mediaType: mediaType,
+	}
+	videoThumbnails[videoID] = thumbnailData
+
+	// STEP 7: Update the video metadata with thumbnail URL
+	thumbnailURL := fmt.Sprintf("http://localhost:%s/api/thumbnails/%s", cfg.port, videoID.String())
+	
+	// Update the video's thumbnail URL
+	video.ThumbnailURL = &thumbnailURL
+	err = cfg.db.UpdateVideo(video)  // Pass the video object, get back only error
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to update video", err)
+		return
+	}
+
+	// STEP 8: Get the updated video from database and respond
+	updatedVideo, err := cfg.db.GetVideo(videoID)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to get updated video", err)
+		return
+	}
+
+	respondWithJSON(w, http.StatusOK, updatedVideo)
 }
