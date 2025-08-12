@@ -1,12 +1,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
-	"mime"
 
 	"github.com/bootdotdev/learn-file-storage-s3-golang-starter/internal/auth"
 	"github.com/google/uuid"
@@ -32,15 +34,13 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Parse the form data
-	const maxMemory = 10 << 20 // 10MB
+	const maxMemory = 10 << 20
 	err = r.ParseMultipartForm(maxMemory)
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to parse form", err)
 		return
 	}
 
-	// Get the image data from the form
 	file, fileHeader, err := r.FormFile("thumbnail")
 	if err != nil {
 		respondWithError(w, http.StatusBadRequest, "Unable to get file from form", err)
@@ -61,46 +61,37 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Get the video's metadata and check ownership
 	video, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusNotFound, "Video not found", err)
 		return
 	}
 
-	// Check if the authenticated user owns this video
 	if video.UserID != userID {
 		respondWithError(w, http.StatusUnauthorized, "You can only upload thumbnails for your own videos", nil)
 		return
 	}
 
-	// STEP 1A: Determine file extension from Content-Type
+	randomBytes := make([]byte, 32)
+	_, err = rand.Read(randomBytes)
+	if err != nil {
+		respondWithError(w, http.StatusInternalServerError, "Unable to generate random filename", err)
+		return
+	}
+
+	randomFilename := base64.RawURLEncoding.EncodeToString(randomBytes)
+
 	var fileExtension string
 	switch mediaType {
 	case "image/jpeg":
 		fileExtension = ".jpg"
 	case "image/png":
 		fileExtension = ".png"
-	case "image/gif":
-		fileExtension = ".gif"
-	case "image/webp":
-		fileExtension = ".webp"
-	default:
-		// Try to get extension from filename as fallback
-		if filename := fileHeader.Filename; filename != "" {
-			fileExtension = filepath.Ext(filename)
-		}
-		if fileExtension == "" {
-			respondWithError(w, http.StatusBadRequest, "Unsupported file type", nil)
-			return
-		}
 	}
 
-	// STEP 1B: Create unique file path using videoID
-	filename := videoID.String() + fileExtension
+	filename := randomFilename + fileExtension
 	filePath := filepath.Join(cfg.assetsRoot, filename)
 
-	// STEP 1C: Create the new file
 	newFile, err := os.Create(filePath)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to create file", err)
@@ -108,17 +99,14 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 	}
 	defer newFile.Close()
 
-	// STEP 1D: Copy contents from multipart file to new file on disk
 	_, err = io.Copy(newFile, file)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to save file", err)
 		return
 	}
 
-	// STEP 2: Update the thumbnail_url to point to the file server
 	thumbnailURL := fmt.Sprintf("http://localhost:%s/assets/%s", cfg.port, filename)
 
-	// Store the file URL in the database
 	video.ThumbnailURL = &thumbnailURL
 	err = cfg.db.UpdateVideo(video)
 	if err != nil {
@@ -126,7 +114,6 @@ func (cfg *apiConfig) handlerUploadThumbnail(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Get the updated video from database and respond
 	updatedVideo, err := cfg.db.GetVideo(videoID)
 	if err != nil {
 		respondWithError(w, http.StatusInternalServerError, "Unable to get updated video", err)
